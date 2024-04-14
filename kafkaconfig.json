@@ -1,0 +1,36 @@
+{
+    "apikey": "ahbcgj",
+    "mqtts": [
+      {
+        "type": "",
+        "broker": "broker.hivemq.com",
+        "port": "1883",
+        "certFile": "",
+        "keyFile": "",
+        "caFile": "",
+        "topics": [
+          {
+            "topic": "iac/gauge/value",
+            "qos": "0",
+            "handler": "IAC_EM_GaugeDataCollection_Test",
+            "mode": "sync",
+            "type": "local"
+          },
+          {
+            "topic": "IAC_MachineState",
+            "qos": "0",
+            "handler": "IAC_MachineDataCollection",
+            "mode": "sync",
+            "type": "ws"
+          },
+          {
+            "topic": "IAC_MachineReport",
+            "qos": "0",
+            "handler": "IAC_MachineProductionCollection",
+            "mode": "sync",
+            "type": "local"
+          }
+        ]
+      }
+    ]
+  }
