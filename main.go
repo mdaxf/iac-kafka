@@ -8,24 +8,36 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mdaxf/iac/com"
 	"github.com/mdaxf/iac/config"
 	dbconn "github.com/mdaxf/iac/databases"
 	"github.com/mdaxf/iac/documents"
 	"github.com/mdaxf/iac/engine/trancode"
 	"github.com/mdaxf/iac/framework/callback_mgr"
+	"github.com/mdaxf/iac/health"
 	"github.com/mdaxf/iac/integration/kafka"
 	iacmb "github.com/mdaxf/iac/integration/signalr"
 	"github.com/mdaxf/iac/logger"
 	"github.com/mdaxf/signalrsrv/signalr"
 )
 
+var (
+	AppComponentName string = "iac-kafka"
+	AppVersion       string = "1.0.0"
+	AppDescription   string = "IAC Kafka Component"
+	AppID            string = ""
+
+	KafkaConsumers []*kafka.KafkaConsumer
+)
+
 func main() {
 	startTime := time.Now()
-
+	var wg sync.WaitGroup
 	gconfig, err := config.LoadGlobalConfig()
 
 	if err != nil {
@@ -33,6 +45,8 @@ func main() {
 		//ilog.Error(fmt.Sprintf("Failed to load global configuration: %v", err))
 	}
 	initializeloger(gconfig)
+
+	AppID = uuid.New().String()
 
 	ilog := logger.Log{ModuleName: logger.Framework, User: "System", ControllerName: "iac-mqtt"}
 	ilog.Debug("Start the iac-mqtt")
@@ -61,13 +75,80 @@ func main() {
 		tfr := trancode.TranFlowstr{}
 		callback_mgr.RegisterCallBack("TranCode_Execute", tfr.Execute)
 	}
-
-	initializeKafka(gconfig, ilog, DB, docDB, IACMessageBusClient)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		initializeKafka(gconfig, ilog, DB, docDB, IACMessageBusClient)
+	}()
+	// Start the HeartBeat
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			HeartBeat(ilog, gconfig, DB, docDB, IACMessageBusClient)
+			time.Sleep(5 * time.Minute)
+		}
+	}()
 
 	elapsed := time.Since(startTime)
 	ilog.PerformanceWithDuration("iac-mqtt.main", elapsed)
+	wg.Wait()
 
-	//waitForTerminationSignal()
+	waitForTerminationSignal(ilog, gconfig)
+}
+
+func HeartBeat(ilog logger.Log, gconfig *config.GlobalConfig, DB *sql.DB, DocDB *documents.DocDB, IACMessageBusClient signalr.Client) {
+	ilog.Debug("Start HeartBeat for iac-activemq application with appid: " + AppID)
+	appHeartBeatUrl := com.ConverttoString(gconfig.AppServer["url"]) + "/IACComponents/heartbeat"
+	ilog.Debug("HeartBeat URL: " + appHeartBeatUrl)
+	nodedata := make(map[string]interface{})
+	nodedata["Name"] = AppComponentName
+	nodedata["AppID"] = AppID
+	nodedata["Description"] = AppDescription
+	nodedata["Type"] = "Kafka"
+	nodedata["Version"] = "1.0.0"
+
+	result, err := health.CheckNodeHealth(nodedata, DB, DocDB.MongoDBClient, IACMessageBusClient)
+
+	ilog.Debug(fmt.Sprintf("HeartBeat Result: %v", result))
+
+	serviceresult, err := CheckServiceStatus(ilog)
+	if err != nil {
+		ilog.Error(fmt.Sprintf("HeartBeat error: %v", err))
+	}
+
+	data := make(map[string]interface{})
+	data["Node"] = nodedata
+	data["Result"] = result
+	data["ServiceStatus"] = serviceresult
+	data["time"] = time.Now().UTC()
+	// send the heartbeat to the server
+	headers := make(map[string]string)
+	headers["Content-Type"] = "application/json"
+	headers["Authorization"] = "apikey " + com.ConverttoString(gconfig.AppServer["apikey"])
+
+	response, err := com.CallWebService(appHeartBeatUrl, "POST", data, headers)
+
+	if err != nil {
+		ilog.Error(fmt.Sprintf("HeartBeat error: %v", err))
+		return
+	}
+
+	ilog.Debug(fmt.Sprintf("HeartBeat post response: %v", response))
+}
+
+func CheckServiceStatus(iLog logger.Log) (map[string]interface{}, error) {
+	iLog.Debug("Check ActiveMQ Status")
+	result := make(map[string]interface{})
+
+	for _, consumer := range KafkaConsumers {
+		if consumer.Consumer != nil {
+			result[consumer.Config.Server] = true
+		} else {
+			result[consumer.Config.Server] = false
+		}
+	}
+	return result, nil
 }
 
 func initializeloger(gconfig *config.GlobalConfig) error {
@@ -104,23 +185,47 @@ func initializeKafka(gconfig *config.GlobalConfig, ilog logger.Log, DB *sql.DB, 
 
 		}
 		ilog.Debug(fmt.Sprintf("Kafka Connection configuration: %v", logger.ConvertJson(kafkacfgs)))
-		i := 1
+		i := 0
 		for _, kafakacfg := range kafkacfgs.Kafkas {
 			ilog.Debug(fmt.Sprintf("Single Kafka Connection configuration: %s", logger.ConvertJson(kafakacfg)))
 			kafkacon := kafka.NewKafkaConsumerExternal(kafakacfg, DocDB, DB, IACMessageBusClient)
 			kafkacon.AppServer = com.ConverttoString(gconfig.AppServer["url"])
 			kafkacon.ApiKey = kafkacfgs.ApiKey
+			KafkaConsumers = append(KafkaConsumers, kafkacon)
 			i++
 		}
 	}()
 
 }
 
-func waitForTerminationSignal() {
+func waitForTerminationSignal(ilog logger.Log, gconfig *config.GlobalConfig) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	<-c
 	fmt.Println("\nShutting down...")
+	ilog.Debug("Start HeartBeat for iac-activemq application with appid: " + AppID)
+	appHeartBeatUrl := com.ConverttoString(gconfig.AppServer["url"]) + "/IACComponents/close"
+	ilog.Debug("HeartBeat URL: " + appHeartBeatUrl)
+	nodedata := make(map[string]interface{})
+	nodedata["Name"] = AppComponentName
+	nodedata["AppID"] = AppID
+	nodedata["Description"] = AppDescription
+	nodedata["Type"] = "Kafka"
+	nodedata["Version"] = "1.0.0"
+
+	data := make(map[string]interface{})
+	data["Node"] = nodedata
+	data["time"] = time.Now().UTC()
+
+	headers := make(map[string]string)
+	headers["Content-Type"] = "application/json"
+	headers["Authorization"] = "apikey " + com.ConverttoString(gconfig.AppServer["apikey"])
+
+	_, err := com.CallWebService(appHeartBeatUrl, "POST", data, headers)
+
+	if err != nil {
+		ilog.Error(fmt.Sprintf("HeartBeat error: %v", err))
+	}
 
 	time.Sleep(2 * time.Second) // Add any cleanup or graceful shutdown logic here
 	os.Exit(0)
