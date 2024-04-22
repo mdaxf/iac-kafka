@@ -4,7 +4,7 @@ go 1.21.4
 
 require (
 	github.com/google/uuid v1.4.0
-	github.com/mdaxf/iac v0.0.0-20240414041413-7fb0409a176e
+	github.com/mdaxf/iac v0.0.0-20240421173856-1ac49e5902fe
 	github.com/mdaxf/signalrsrv v0.0.0-20231208201552-dfbb574e5c80
 )
 
