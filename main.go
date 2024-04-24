@@ -26,7 +26,7 @@ import (
 	"github.com/mdaxf/iac/integration/kafka"
 	iacmb "github.com/mdaxf/iac/integration/signalr"
 	"github.com/mdaxf/iac/logger"
-	"github.com/mdaxf/signalrsrv/signalr"
+	"github.com/mdaxf/iac-signalr/signalr"
 )
 
 var (
